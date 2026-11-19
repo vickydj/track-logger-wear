@@ -23,6 +23,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.wear.compose.material.Button
+import androidx.wear.compose.material.Chip
+import androidx.wear.compose.material.ChipDefaults
+import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Scaffold
 import androidx.wear.compose.material.Text
@@ -75,48 +82,69 @@ class MainActivity : ComponentActivity() {
 fun WearApp(onToggle: () -> Unit) {
     MaterialTheme {
         val s by LoggerState.state.collectAsState()
+        val ctx = LocalContext.current
+        var gpsMs by remember { mutableStateOf(Settings.gpsMs(ctx)) }
+        var imuHz by remember { mutableStateOf(Settings.imuHz(ctx)) }
         Scaffold(timeText = { TimeText() }) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.Center,
+            ScalingLazyColumn(
+                modifier = Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(
-                    text = "%.0f km/h".format(s.speedKmh),
-                    style = MaterialTheme.typography.title1,
-                )
-                Text(
-                    text = "GPS ${s.satsUsed}/${s.satsVisible} sats",
-                    style = MaterialTheme.typography.caption1,
-                )
-                Text(
-                    text = "fixes ${s.gpsFixes}  imu ${s.imuSamples}",
-                    style = MaterialTheme.typography.caption1,
-                )
-                if (!s.accuracyM.isNaN()) {
+                item {
                     Text(
-                        text = "+/- %.1f m".format(s.accuracyM),
+                        text = "%.0f km/h".format(s.speedKmh),
+                        style = MaterialTheme.typography.title1,
+                    )
+                }
+                item {
+                    Text(
+                        text = "GPS ${s.satsUsed}/${s.satsVisible} sats" +
+                            if (s.accuracyM.isNaN()) "" else "  +/-%.1f m".format(s.accuracyM),
                         style = MaterialTheme.typography.caption1,
                     )
                 }
-                Spacer(Modifier.height(6.dp))
-                Button(onClick = onToggle) {
-                    Text(if (s.running) "Stop" else "Start")
-                }
-                Text(
-                    text = s.message,
-                    style = MaterialTheme.typography.caption2,
-                    textAlign = TextAlign.Center,
-                )
-                s.lastSession?.let {
+                item {
                     Text(
-                        text = it,
+                        text = "gps ${s.gpsHz} Hz (${s.gpsFixes})  imu ${s.imuHz} Hz (${s.imuSamples})",
                         style = MaterialTheme.typography.caption2,
                         textAlign = TextAlign.Center,
-                        maxLines = 2,
                     )
+                }
+                item {
+                    Button(onClick = onToggle) { Text(if (s.running) "Stop" else "Start") }
+                }
+                item {
+                    Chip(
+                        onClick = { if (!s.running) gpsMs = Settings.cycleGps(ctx) },
+                        enabled = !s.running,
+                        label = { Text(Settings.gpsLabel(gpsMs)) },
+                        colors = ChipDefaults.secondaryChipColors(),
+                    )
+                }
+                item {
+                    Chip(
+                        onClick = { if (!s.running) imuHz = Settings.cycleImu(ctx) },
+                        enabled = !s.running,
+                        label = { Text(Settings.imuLabel(imuHz)) },
+                        colors = ChipDefaults.secondaryChipColors(),
+                    )
+                }
+                item {
+                    Text(
+                        text = s.message,
+                        style = MaterialTheme.typography.caption2,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                s.lastSession?.let {
+                    item {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.caption2,
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                        )
+                    }
                 }
             }
         }

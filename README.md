@@ -1,4 +1,4 @@
-# Track Logger for Wear OS (v0.1, untested)
+# Track Logger for Wear OS (v0.2, untested)
 
 Standalone Wear OS app that records raw GPS (about 1 Hz) and accelerometer + gyro (about 100 Hz requested)
 into a `tlog-1` session bundle, the same format as the Track Logger plan, so the phone app and the
@@ -49,7 +49,8 @@ If that path is blocked on your watch's Android version, use a debug build and:
 
 ## Known limits
 
-- GPS is whatever the watch chip delivers (about 1 Hz). Requesting more does nothing.
+- GPS rate is chosen on the watch (Max, 1 s, 2 s, 5 s). Max = whatever the watch GNSS chip delivers; the measured rate is shown live and saved in session.json. Not confirmed above 1 Hz for the Galaxy Watch Ultra, so check the measured value.
+- IMU rate is chosen on the watch (Max, 200, 100, 50, 25 Hz, off). Max uses each sensor minimum delay; requested and actual periods are saved in session.json.
 - IMU rows are accelerometer-driven with the latest gyro value held (not interpolated).
 - Wrist mounting: axes are not fixed to the car. Fine for rough g-force comparison only.
 - No lap timer, no track selection yet (track is "unspecified"), no phone sync yet. Manual adb pull.

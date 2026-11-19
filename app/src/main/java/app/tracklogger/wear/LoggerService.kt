@@ -51,7 +51,6 @@ class LoggerService : Service() {
         const val ACTION_STOP = "app.tracklogger.wear.STOP"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
-        private const val IMU_PERIOD_US = 10_000 // 100 Hz requested; actual rate is logged in session.json
     }
 
     private var thread: HandlerThread? = null
@@ -73,6 +72,13 @@ class LoggerService : Service() {
     private var lastAcc = Float.NaN
     private var hasAccel = false
     private var hasGyro = false
+    private var gpsIntervalMs = 0L
+    private var imuSetting = -1
+    private var imuPeriodUs = 0
+    private var accelMinDelayUs = 0
+    private var gyroMinDelayUs = 0
+    private var lastTickGps = 0L
+    private var lastTickImu = 0L
     private val gyro = FloatArray(3)
 
     private val locationListener = LocationListener { loc -> onLocation(loc) }
@@ -122,6 +128,10 @@ class LoggerService : Service() {
             val sv = satsVisible
             val spd = lastSpeed * 3.6f
             val acc = lastAcc
+            val gHz = (g - lastTickGps).toInt()
+            val iHz = (i - lastTickImu).toInt()
+            lastTickGps = g
+            lastTickImu = i
             LoggerState.update {
                 it.copy(
                     running = true,
@@ -131,6 +141,8 @@ class LoggerService : Service() {
                     satsVisible = sv,
                     speedKmh = spd,
                     accuracyM = acc,
+                    gpsHz = gHz,
+                    imuHz = iHz,
                     message = if (g == 0L) "Waiting for GPS..." else "Recording",
                 )
             }
@@ -182,6 +194,10 @@ class LoggerService : Service() {
         lastSpeed = 0f
         lastAcc = Float.NaN
         gyro.fill(0f)
+        lastTickGps = 0
+        lastTickImu = 0
+        gpsIntervalMs = Settings.gpsMs(this)
+        imuSetting = Settings.imuHz(this)
 
         val base = SimpleDateFormat("yyyy-MM-dd_HHmm", Locale.US).format(Date()) + "_unspecified_watch"
         val root = File(getExternalFilesDir(null) ?: filesDir, "sessions")
@@ -205,8 +221,9 @@ class LoggerService : Service() {
 
         try {
             lm.registerGnssStatusCallback(Executor { r -> h.post(r) }, gnssCallback)
-            // minTime 0 = as fast as the GNSS chip delivers (about 1 Hz); a 1000 ms floor can drop early fixes.
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0L, 0f, locationListener, t.looper)
+            // minTime 0 = as fast as the GNSS chip delivers; otherwise a best-effort minimum interval.
+            // The measured rate is what counts and is written to session.json.
+            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, gpsIntervalMs, 0f, locationListener, t.looper)
         } catch (e: SecurityException) {
             LoggerState.update { it.copy(message = "Location permission error") }
         }
@@ -215,8 +232,20 @@ class LoggerService : Service() {
         val gy = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         hasAccel = acc != null
         hasGyro = gy != null
-        if (acc != null) sm.registerListener(sensorListener, acc, IMU_PERIOD_US, 0, h)
-        if (gy != null) sm.registerListener(sensorListener, gy, IMU_PERIOD_US, 0, h)
+        accelMinDelayUs = acc?.minDelay ?: 0
+        gyroMinDelayUs = gy?.minDelay ?: 0
+        if (imuSetting != 0) {
+            // Max = each sensor's own minimum delay; a fixed Hz is clamped to what the sensor supports.
+            fun period(s: Sensor): Int {
+                val floor = if (s.minDelay > 0) s.minDelay else 5_000
+                return if (imuSetting < 0) floor else maxOf(floor, 1_000_000 / imuSetting)
+            }
+            if (acc != null) {
+                imuPeriodUs = period(acc)
+                sm.registerListener(sensorListener, acc, imuPeriodUs, 0, h)
+            }
+            if (gy != null) sm.registerListener(sensorListener, gy, period(gy), 0, h)
+        }
 
         h.post(tick)
         LoggerState.update { LoggerUiState(running = true, message = "Waiting for GPS...") }
@@ -294,7 +323,7 @@ class LoggerService : Service() {
         j.put("source", "wear-os-watch")
         j.put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
         j.put("android_sdk", Build.VERSION.SDK_INT)
-        j.put("app_version", "0.1.0")
+        j.put("app_version", "0.2.0")
         j.put("track", "unspecified")
         j.put("start_utc", iso.format(Date(startWallMs)))
         j.put("duration_s", Math.round(safeDur * 10.0) / 10.0)
@@ -307,6 +336,11 @@ class LoggerService : Service() {
         } else {
             j.put("time_to_first_fix_s", JSONObject.NULL)
         }
+        j.put("gps_rate_requested", if (gpsIntervalMs == 0L) "max" else "every ${gpsIntervalMs} ms")
+        j.put("imu_rate_requested", when (imuSetting) { -1 -> "max"; 0 -> "off"; else -> "$imuSetting Hz" })
+        j.put("imu_period_us_used", imuPeriodUs)
+        j.put("accel_min_delay_us", accelMinDelayUs)
+        j.put("gyro_min_delay_us", gyroMinDelayUs)
         j.put("accelerometer_available", hasAccel)
         j.put("gyroscope_available", hasGyro)
         j.put("clock", "t_mono_us = elapsedRealtimeNanos/1000, shared by GPS and IMU rows")

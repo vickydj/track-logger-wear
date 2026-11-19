@@ -13,6 +13,10 @@ data class LoggerUiState(
     val satsVisible: Int = 0,
     val speedKmh: Float = 0f,
     val accuracyM: Float = Float.NaN,
+    val gpsHz: Int = 0,
+    val imuHz: Int = 0,
+    val gpsMs: Long = 0L,
+    val imuSetting: Int = -1,
     val message: String = "Ready",
     val lastSession: String? = null,
 )
