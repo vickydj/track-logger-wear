@@ -51,6 +51,7 @@ class LoggerService : Service() {
         const val ACTION_STOP = "app.tracklogger.wear.STOP"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
+        private const val BATCH_LATENCY_US = 100_000
     }
 
     private var thread: HandlerThread? = null
@@ -60,6 +61,12 @@ class LoggerService : Service() {
 
     @Volatile
     private var recording = false
+
+    /** True from Stop until the zip is written. Start and Stop are ignored meanwhile. */
+    @Volatile
+    private var saving = false
+    private var failure: String? = null
+    private var clockOffsetNs: Long? = null
 
     private var startWallMs = 0L
     private var startElapsedNs = 0L
@@ -97,6 +104,7 @@ class LoggerService : Service() {
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
             val w = writer ?: return
+            if (checkFailed(w)) return
             when (e.sensor.type) {
                 Sensor.TYPE_GYROSCOPE -> {
                     gyro[0] = e.values[0]
@@ -104,7 +112,9 @@ class LoggerService : Service() {
                     gyro[2] = e.values[2]
                 }
                 Sensor.TYPE_ACCELEROMETER -> {
-                    // SensorEvent.timestamp shares the elapsedRealtimeNanos timebase with Location.
+                    // SensorEvent.timestamp should share the elapsedRealtimeNanos timebase with Location.
+                    // The first offset is saved in session.json so a different clock would show up.
+                    if (clockOffsetNs == null) clockOffsetNs = e.timestamp - SystemClock.elapsedRealtimeNanos()
                     w.imuRow(
                         e.timestamp / 1000L,
                         e.values[0], e.values[1], e.values[2],
@@ -121,7 +131,10 @@ class LoggerService : Service() {
     private val tick = object : Runnable {
         override fun run() {
             if (!recording) return
-            writer?.flush()
+            writer?.let {
+                it.flush()
+                if (checkFailed(it)) return
+            }
             val g = gpsCount
             val i = imuCount
             val su = satsUsed
@@ -160,8 +173,19 @@ class LoggerService : Service() {
         return START_NOT_STICKY
     }
 
+    /** On the I/O thread: a write error stops the session and keeps what was already written. */
+    private fun checkFailed(w: SessionWriter): Boolean {
+        if (!w.failed) return false
+        if (failure == null) {
+            failure = "Storage error, stopped"
+            stopRecording()
+        }
+        return true
+    }
+
     private fun onLocation(loc: Location) {
         val w = writer ?: return
+        if (checkFailed(w)) return
         if (gpsCount == 0L) firstFixElapsedNs = loc.elapsedRealtimeNanos
         w.gpsRow(loc, satsUsed)
         gpsCount++
@@ -170,7 +194,9 @@ class LoggerService : Service() {
     }
 
     private fun startRecording() {
-        if (recording) return
+        if (recording || saving) return
+        failure = null
+        clockOffsetNs = null
 
         // The activity requests permission before starting us; this is a safety net.
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
@@ -199,7 +225,7 @@ class LoggerService : Service() {
         gpsIntervalMs = Settings.gpsMs(this)
         imuSetting = Settings.imuHz(this)
 
-        val base = SimpleDateFormat("yyyy-MM-dd_HHmm", Locale.US).format(Date()) + "_unspecified_watch"
+        val base = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date()) + "_unspecified_watch"
         val root = File(getExternalFilesDir(null) ?: filesDir, "sessions")
         val dir = File(root, base)
         dir.mkdirs()
@@ -236,15 +262,14 @@ class LoggerService : Service() {
         gyroMinDelayUs = gy?.minDelay ?: 0
         if (imuSetting != 0) {
             // Max = each sensor's own minimum delay; a fixed Hz is clamped to what the sensor supports.
-            fun period(s: Sensor): Int {
-                val floor = if (s.minDelay > 0) s.minDelay else 5_000
-                return if (imuSetting < 0) floor else maxOf(floor, 1_000_000 / imuSetting)
-            }
+            // 100 ms batching lets the CPU sleep between deliveries; timestamps stay exact.
             if (acc != null) {
-                imuPeriodUs = period(acc)
-                sm.registerListener(sensorListener, acc, imuPeriodUs, 0, h)
+                imuPeriodUs = CsvFormat.imuPeriodUs(acc.minDelay, imuSetting)
+                sm.registerListener(sensorListener, acc, imuPeriodUs, BATCH_LATENCY_US, h)
             }
-            if (gy != null) sm.registerListener(sensorListener, gy, period(gy), 0, h)
+            if (gy != null) {
+                sm.registerListener(sensorListener, gy, CsvFormat.imuPeriodUs(gy.minDelay, imuSetting), BATCH_LATENCY_US, h)
+            }
         }
 
         h.post(tick)
@@ -267,12 +292,13 @@ class LoggerService : Service() {
 
     private fun stopRecording() {
         if (!recording) {
-            stopSelf()
+            if (!saving) stopSelf()
             return
         }
         recording = false
+        saving = true
         unregisterAll()
-        LoggerState.update { it.copy(message = "Saving...") }
+        LoggerState.update { it.copy(running = false, saving = true, message = "Saving...") }
         // Queued events are processed in order, so finishSession runs after the last sample.
         val h = handler
         if (h != null) h.post { finishSession() } else stopSelf()
@@ -287,7 +313,7 @@ class LoggerService : Service() {
         val dir = w?.dir
         val durS = (SystemClock.elapsedRealtimeNanos() - startElapsedNs) / 1e9
 
-        var result = "Saved"
+        var result = failure ?: "Saved"
         var zipName: String? = null
         if (dir != null) {
             try {
@@ -304,7 +330,10 @@ class LoggerService : Service() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
 
-        LoggerState.update { it.copy(running = false, message = result, lastSession = zipName ?: it.lastSession) }
+        LoggerState.update {
+            it.copy(running = false, saving = false, message = result, lastSession = zipName ?: it.lastSession)
+        }
+        saving = false
 
         thread?.quitSafely()
         thread = null
@@ -323,7 +352,7 @@ class LoggerService : Service() {
         j.put("source", "wear-os-watch")
         j.put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
         j.put("android_sdk", Build.VERSION.SDK_INT)
-        j.put("app_version", "0.2.0")
+        j.put("app_version", packageManager.getPackageInfo(packageName, 0).versionName)
         j.put("track", "unspecified")
         j.put("start_utc", iso.format(Date(startWallMs)))
         j.put("duration_s", Math.round(safeDur * 10.0) / 10.0)
@@ -341,6 +370,8 @@ class LoggerService : Service() {
         j.put("imu_period_us_used", imuPeriodUs)
         j.put("accel_min_delay_us", accelMinDelayUs)
         j.put("gyro_min_delay_us", gyroMinDelayUs)
+        j.put("sensor_clock_offset_ns", clockOffsetNs ?: JSONObject.NULL)
+        j.put("sensor_clock_note", "first accel event timestamp minus elapsedRealtimeNanos at delivery; expect a small negative number (milliseconds). Seconds or more means IMU and GPS use different clocks")
         j.put("accelerometer_available", hasAccel)
         j.put("gyroscope_available", hasGyro)
         j.put("clock", "t_mono_us = elapsedRealtimeNanos/1000, shared by GPS and IMU rows")

@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.update
 
 data class LoggerUiState(
     val running: Boolean = false,
+    val saving: Boolean = false,
     val gpsFixes: Long = 0,
     val imuSamples: Long = 0,
     val satsUsed: Int = 0,
@@ -15,8 +16,6 @@ data class LoggerUiState(
     val accuracyM: Float = Float.NaN,
     val gpsHz: Int = 0,
     val imuHz: Int = 0,
-    val gpsMs: Long = 0L,
-    val imuSetting: Int = -1,
     val message: String = "Ready",
     val lastSession: String? = null,
 )
